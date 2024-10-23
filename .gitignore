@@ -1,0 +1,5 @@
+tmp/
+.zig-cache/
+
+main
+main.o
