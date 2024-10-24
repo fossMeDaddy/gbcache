@@ -1,5 +1,6 @@
 const std = @import("std");
 const lib = @import("lib.zig");
+const lru_cache = @import("lru.zig");
 
 var gpa = std.heap.GeneralPurposeAllocator(.{}){};
 
@@ -26,6 +27,7 @@ pub const StorageManager = struct {
     _bucket_offset: u64 = 0,
     _mem_alloc: std.mem.Allocator = gpa.allocator(),
     _key_storage_path: ?[]const u8 = null,
+    _lru: ?lru_cache.LRUCache([]const u8, Key) = null,
 
     pub fn init(self: *StorageManager) !void {
         if (self._file) |file| {
@@ -35,6 +37,10 @@ pub const StorageManager = struct {
 
         const key_storage_path = try std.fs.path.join(self._mem_alloc, &[_][]const u8{ self.absolute_path, self.bin_filename });
         const result = try lib.fs.openOrCreateFileRW(key_storage_path);
+        const lru = lru_cache.LRUCache([]const u8, Key){};
+
+        try lru.init();
+
         self._file = result.file;
         self._key_storage_path = key_storage_path;
 
@@ -53,7 +59,14 @@ pub const StorageManager = struct {
         self._bucket_offset = @sizeOf(Key) * self.max_bucket_size;
     }
 
-    fn get_bucket(self: *StorageManager, key_hash: u64) !struct { buf: []u8, offset: u64 } {
+    pub fn deinit(self: *StorageManager) void {
+        if (self._file) |file| {
+            file.close();
+            self._file = file;
+        }
+    }
+
+    fn _get_bucket_disk(self: *StorageManager, key_hash: u64) !struct { buf: []u8, offset: u64 } {
         const file = self._file.?;
 
         const index = key_hash % self.capacity;
@@ -67,8 +80,14 @@ pub const StorageManager = struct {
         return .{ .buf = bucket_buf, .offset = offset };
     }
 
-    pub fn get(self: *StorageManager, key_hash: u64) !Key {
-        const bucket = try self.get_bucket(key_hash);
+    pub fn gen_key_hash(key_str: []const u8) u64 {
+        return std.hash_map.hashString(key_str);
+    }
+
+    fn _get_key_disk(self: *StorageManager, key_str: u64) !?Key {
+        const key_hash = self.gen_key_hash(key_str);
+
+        const bucket = try self._get_bucket_disk(key_hash);
         defer self._mem_alloc.free(bucket.buf);
 
         for (0..self.max_bucket_size) |bucketI| {
@@ -83,13 +102,13 @@ pub const StorageManager = struct {
             }
         }
 
-        return Key{ .key_hash = 0, .value_offset = 0, .value_size = 0 };
+        return null;
     }
 
-    pub fn set(self: *StorageManager, key: Key) !void {
+    fn _set_key_disk(self: *StorageManager, key: Key) !void {
         const file = self._file.?;
 
-        const bucket = try self.get_bucket(key.key_hash);
+        const bucket = try self._get_bucket_disk(key.key_hash);
         defer self._mem_alloc.free(bucket.buf);
 
         var write_key_offset: u64 = undefined;
@@ -126,11 +145,35 @@ pub const StorageManager = struct {
         try file.sync();
     }
 
-    pub fn deinit(self: *StorageManager) void {
-        if (self._file) |file| {
-            file.close();
-            self._file = file;
+    pub fn get(self: *StorageManager, key_str: []const u8) ?Key {
+        const lru = self._lru.?;
+
+        const key_ptr: *Key = undefined;
+        if (lru.get(key_str)) |key_ptr_lru| {
+            return key_ptr_lru;
+        } else {
+            const key = try self._get_key_disk(key_str);
+            if (key) |k| {
+                key_ptr = try lru.set(key_str, k);
+            } else {
+                return null;
+            }
         }
+
+        return key_ptr.*;
+    }
+
+    /// i am sorry, key_str is redundant as key will have the hash, but i need key_str for lru key-value mapping
+    /// PLEASE ENSURE THIS: StorageManager._gen_key_hash(key_str) != key.key_hash
+    /// I AM BEGGING YOU.
+    pub fn set(self: *StorageManager, key_str: []const u8, key: Key) !void {
+        const lru = self._lru.?;
+
+        _ = try lru.set(key_str, key);
+
+        // TODO: spawn a thread to keep the disk updated
+        // (batch updates would work, NOPE, RWLOCK on file almost-immediate syncing will, i mean should...)
+        try self._set_key_disk(key);
     }
 
     // pub fn set(self: KeyStorageManager, key: Key) !void {}
