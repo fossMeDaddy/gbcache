@@ -27,7 +27,7 @@ pub const StorageManager = struct {
     _bucket_offset: u64 = 0,
     _mem_alloc: std.mem.Allocator = gpa.allocator(),
     _key_storage_path: ?[]const u8 = null,
-    _lru: ?lru_cache.LRUCache([]const u8, Key) = null,
+    _lru: ?*lru_cache.LRUCache([]const u8, Key) = null,
 
     pub fn init(self: *StorageManager) !void {
         if (self._file) |file| {
@@ -37,12 +37,17 @@ pub const StorageManager = struct {
 
         const key_storage_path = try std.fs.path.join(self._mem_alloc, &[_][]const u8{ self.absolute_path, self.bin_filename });
         const result = try lib.fs.openOrCreateFileRW(key_storage_path);
-        const lru = lru_cache.LRUCache([]const u8, Key){};
+        const lru = try self._mem_alloc.create(lru_cache.LRUCache([]const u8, Key));
+        lru.* = lru_cache.LRUCache([]const u8, Key){
+            .allocator = self._mem_alloc,
+            .capacity = 10_000,
+        };
 
         try lru.init();
 
         self._file = result.file;
         self._key_storage_path = key_storage_path;
+        self._lru = lru;
 
         if (result.created) {
             const zero_key = Key{ .key_hash = 0, .value_offset = 0, .value_size = 0 };
@@ -80,25 +85,19 @@ pub const StorageManager = struct {
         return .{ .buf = bucket_buf, .offset = offset };
     }
 
-    pub fn gen_key_hash(key_str: []const u8) u64 {
-        return std.hash_map.hashString(key_str);
-    }
-
-    fn _get_key_disk(self: *StorageManager, key_str: u64) !?Key {
-        const key_hash = self.gen_key_hash(key_str);
-
+    fn _get_key_disk(self: *StorageManager, key_hash: u64) !?Key {
         const bucket = try self._get_bucket_disk(key_hash);
         defer self._mem_alloc.free(bucket.buf);
 
         for (0..self.max_bucket_size) |bucketI| {
             const start = bucketI * @sizeOf(Key);
             const key_buf = bucket.buf[start .. start + @sizeOf(Key)];
-            const key = lib.ptrs.bufToStruct(Key, &key_buf);
+            const key = lib.ptrs.bufToType(Key, key_buf);
 
             if (key.key_hash == key_hash) {
                 std.debug.print("matched hash key_buf ({}): {any}\n", .{ bucket.offset, key_buf });
                 std.debug.print("matched hash key: {any}\n", .{key});
-                return key.*;
+                return key;
             }
         }
 
@@ -116,7 +115,7 @@ pub const StorageManager = struct {
         for (0..self.max_bucket_size) |bucketI| {
             const start = bucketI * @sizeOf(Key);
             const key_buf = bucket.buf[start .. start + @sizeOf(Key)];
-            const k = lib.ptrs.bufToStruct(Key, &key_buf);
+            const k = lib.ptrs.bufToType(Key, key_buf);
 
             if (k.key_hash == key.key_hash) {
                 write_key_offset = bucket.offset + start;
@@ -145,29 +144,33 @@ pub const StorageManager = struct {
         try file.sync();
     }
 
-    pub fn get(self: *StorageManager, key_str: []const u8) ?Key {
-        const lru = self._lru.?;
+    pub fn get(self: *StorageManager, key_str: []const u8) !?Key {
+        var lru = self._lru.?;
 
-        const key_ptr: *Key = undefined;
+        var key: Key = undefined;
         if (lru.get(key_str)) |key_ptr_lru| {
             return key_ptr_lru;
         } else {
-            const key = try self._get_key_disk(key_str);
-            if (key) |k| {
-                key_ptr = try lru.set(key_str, k);
+            const key_hash = lru.gen_key_hash(key_str);
+            const _key = try self._get_key_disk(key_hash);
+            if (_key) |k| {
+                key = try lru.set(key_str, k);
             } else {
                 return null;
             }
         }
 
-        return key_ptr.*;
+        return key;
     }
 
-    /// i am sorry, key_str is redundant as key will have the hash, but i need key_str for lru key-value mapping
-    /// PLEASE ENSURE THIS: StorageManager._gen_key_hash(key_str) != key.key_hash
-    /// I AM BEGGING YOU.
-    pub fn set(self: *StorageManager, key_str: []const u8, key: Key) !void {
-        const lru = self._lru.?;
+    pub fn set(self: *StorageManager, key_str: []const u8, value_metadata: lib.types.ValueMetadata) !void {
+        var lru = self._lru.?;
+
+        const key = Key{
+            .key_hash = lru.gen_key_hash(key_str),
+            .value_offset = value_metadata.value_offset,
+            .value_size = value_metadata.value_size,
+        };
 
         _ = try lru.set(key_str, key);
 

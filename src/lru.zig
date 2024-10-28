@@ -1,7 +1,7 @@
 const std = @import("std");
 
 pub fn LRUNode(comptime K: type, comptime V: type) type {
-    const Node = struct {
+    return struct {
         /// map key for lookup
         m_key: K,
         /// map value against the 'm_key' pointer
@@ -10,24 +10,34 @@ pub fn LRUNode(comptime K: type, comptime V: type) type {
         next: ?*@This(),
         prev: ?*@This(),
     };
+}
 
-    return Node;
+pub fn LRUCacheMapContext(comptime K: type) type {
+    return switch (K) {
+        []const u8 => std.hash_map.StringContext,
+        else => std.hash_map.AutoContext(K),
+    };
+}
+
+fn LRUCacheMapType(comptime K: type, comptime V: type) type {
+    return std.HashMap(K, V, LRUCacheMapContext(K), std.hash_map.default_max_load_percentage);
 }
 
 pub fn LRUCache(comptime K: type, comptime V: type) type {
-    const Cache = struct {
+    return struct {
         head: ?*LRUNode(K, V) = null,
         tail: ?*LRUNode(K, V) = null,
         allocator: std.mem.Allocator,
         capacity: u64,
 
-        _map: ?*std.AutoHashMap(K, V) = null,
+        _map: ?*LRUCacheMapType(K, V) = null,
         _size: u64 = 0,
+        _map_ctx: LRUCacheMapContext(K) = LRUCacheMapContext(K){},
         // _thread_pool: std.Thread.Pool = std.Thread.Pool{},
 
         pub fn init(self: *@This()) !void {
-            const m = try self.allocator.create(std.AutoHashMap(K, V));
-            m.* = std.AutoHashMap(K, V).init(self.allocator);
+            const m = try self.allocator.create(LRUCacheMapType(K, V));
+            m.* = LRUCacheMapType(K, V).init(self.allocator);
             self._map = m;
 
             if (self.capacity < 1) {
@@ -40,16 +50,27 @@ pub fn LRUCache(comptime K: type, comptime V: type) type {
             // });
         }
 
+        pub fn eql_keys(self: @This(), k1: K, k2: K) bool {
+            return self._map_ctx.eql(k1, k2);
+        }
+
+        pub fn gen_key_hash(self: @This(), k: K) u64 {
+            return self._map_ctx.hash(k);
+        }
+
         fn _get_node(self: *@This(), m_key: K) ?*LRUNode(K, V) {
+            std.debug.print("_get_node m_key: {any}\n", .{m_key});
+
             var cur_node = self.head;
             while (cur_node) |node| {
-                if (node.m_key == m_key) {
+                if (self.eql_keys(node.m_key, m_key)) {
                     break;
                 }
 
                 cur_node = node.next;
             }
 
+            std.debug.print("found: {any}\n", .{m_key});
             return cur_node;
         }
 
@@ -141,8 +162,6 @@ pub fn LRUCache(comptime K: type, comptime V: type) type {
             return m.get(m_key);
         }
     };
-
-    return Cache;
 }
 
 fn _test_print_lru(lru_cache: *LRUCache(u64, []const u8)) void {
@@ -169,48 +188,38 @@ test "lru cache" {
         .allocator = test_alloc,
     };
     try lru.init();
-    const m = lru._map.?;
-
-    _test_print_lru(&lru);
+    // const m = lru._map.?;
 
     _ = try lru.set(1, "one");
-    _test_print_map_stat(m);
-    _test_print_lru(&lru);
-
     _ = try lru.set(2, "two");
-    _test_print_map_stat(m);
-    _test_print_lru(&lru);
-
     _ = try lru.set(3, "three");
-    _test_print_map_stat(m);
-    _test_print_lru(&lru);
-
     _ = try lru.set(4, "four");
-    _test_print_map_stat(m);
-    _test_print_lru(&lru);
-
     _ = try lru.set(5, "five");
-    _test_print_map_stat(m);
-    _test_print_lru(&lru);
-
     _ = try lru.set(6, "six");
-    _test_print_map_stat(m);
-    _test_print_lru(&lru);
 
     _ = try lru.set(2, "TWO!");
-    _test_print_map_stat(m);
-    _test_print_lru(&lru);
 
     const v3 = lru.get(3);
-    std.debug.print("v3: {s}\n", .{v3.?.*});
-
     const v2 = lru.get(2);
-    std.debug.print("v2: {s}\n", .{v2.?.*});
-
     const v1 = lru.get(1);
-    std.debug.print("v1: {any}\n", .{v1});
 
-    try std.testing.expectEqualStrings(v2.?.*, "TWO!");
+    try std.testing.expectEqualStrings(v2.?, "TWO!");
     try std.testing.expectEqual(v1, null);
-    try std.testing.expectEqual(v3.?.*, "three");
+    try std.testing.expectEqualStrings(v3.?, "three");
+
+    var lru_str = LRUCache([]const u8, u64){
+        .capacity = 3,
+        .allocator = test_alloc,
+    };
+    try lru_str.init();
+
+    _ = try lru_str.set("1", 1);
+    _ = try lru_str.set("2", 2);
+    _ = try lru_str.set("3", 3);
+
+    const s1 = lru_str.get("1");
+    try std.testing.expectEqual(1, s1.?);
+
+    const s3 = lru_str.get("3");
+    try std.testing.expectEqual(3, s3.?);
 }

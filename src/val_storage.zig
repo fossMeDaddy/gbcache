@@ -1,6 +1,7 @@
 const std = @import("std");
 const lib = @import("lib.zig");
 const lru_cache = @import("lru.zig");
+const fs_tracker = @import("fst.zig");
 
 pub const Page = [1024 * 16]u8;
 
@@ -11,11 +12,11 @@ pub const StorageManager = struct {
     bin_filename: []const u8 = "data.bin",
 
     _file: ?std.fs.File = null,
-    _size: u64 = 0,
     _mem_alloc: std.mem.Allocator = gpa.allocator(),
     _val_storage_path: ?[]const u8 = null,
 
-    _lru: ?lru_cache.LRUCache(u64, Page) = null,
+    _lru: ?*lru_cache.LRUCache(u64, Page) = null,
+    _fst: ?*fs_tracker.FreeSpaceTracker = null,
 
     pub fn init(self: *StorageManager) !void {
         if (self._file) |file| {
@@ -25,17 +26,26 @@ pub const StorageManager = struct {
 
         const val_storage_path = try std.fs.path.join(self._mem_alloc, &[_][]const u8{ self.absolute_path, self.bin_filename });
         const result = try lib.fs.openOrCreateFileRW(val_storage_path);
-        const lru = lru_cache.LRUCache(u64, Page){};
-
+        const lru = try self._mem_alloc.create(lru_cache.LRUCache(u64, Page));
+        lru.* = lru_cache.LRUCache(u64, Page){
+            .allocator = self._mem_alloc,
+            .capacity = 10_000,
+        };
         try lru.init();
+
+        const fst = try self._mem_alloc.create(fs_tracker.FreeSpaceTracker);
+        fst.* = fs_tracker.FreeSpaceTracker{
+            .absolute_path = self.absolute_path,
+            .allocator = self._mem_alloc,
+        };
+        try fst.init();
 
         self._file = result.file;
         self._val_storage_path = val_storage_path;
         self._lru = lru;
+        self._fst = fst;
 
-        if (!result.created) {
-            self._size = try result.file.stat();
-        }
+        if (!result.created) {}
     }
 
     pub fn deinit(self: *StorageManager) void {
@@ -47,7 +57,7 @@ pub const StorageManager = struct {
     }
 
     const _GetPageStat = struct { page_offset: u64, cur: u64 };
-    fn _get_page_stat(val_offset: u64) _GetPageStat {
+    fn _get_page_stat(_: StorageManager, val_offset: u64) _GetPageStat {
         var offset: u64 = undefined;
         if (offset >= @sizeOf(Page)) {
             offset = @sizeOf(Page) - val_offset % @sizeOf(Page);
@@ -72,11 +82,11 @@ pub const StorageManager = struct {
         return .{ .buf = page_buf, .bytes_read = @intCast(b_read) };
     }
 
-    fn _write_buf(page_buf: *Page, buf: []const u8, offset: u64) !void {
+    fn _write_buf(_: StorageManager, page_buf: *Page, buf: []const u8, offset: u64) !void {
         if (offset >= page_buf.len) {
             return error.CursorPositionBiggerThanBuffer;
         }
-        if (buf.len > page_buf) {
+        if (buf.len > page_buf.len) {
             return error.WriteBufferTooLarge;
         }
 
@@ -89,42 +99,52 @@ pub const StorageManager = struct {
         const file = self._file.?;
 
         try file.seekTo(page_offset);
-        const b_write = try file.write(page_ptr.*); // mem copy
+        const b_write = try file.write(&page_ptr); // mem copy
         std.debug.assert(b_write == page_ptr.len);
 
         try file.sync();
     }
 
-    pub fn write_value(self: *StorageManager, val_offset: u64, buf: []const u8) !void {
-        const lru = self._lru.?;
+    fn write_value(self: *StorageManager, val_offset: u64, buf: []const u8) !void {
+        var lru = self._lru.?;
 
         const page_stat = self._get_page_stat(val_offset);
 
-        var page_ptr: *Page = undefined;
-        if (lru.get(page_stat.page_offset)) |ptr| {
-            page_ptr = ptr;
+        var page: Page = undefined;
+        if (lru.get(page_stat.page_offset)) |p| {
+            page = p;
         } else {
-            const page = try self._read_page_disk(page_stat.page_offset); // 1 mem copy
-            page_ptr = &page;
+            const disk_page = try self._read_page_disk(page_stat.page_offset); // 1 mem copy
+            page = disk_page.buf;
         }
 
-        try self._write_buf(page_ptr, buf, page_stat.cur);
-        try lru.set(page_stat.page_offset, page_ptr.*); // 2 mem copy
+        try self._write_buf(&page, buf, page_stat.cur);
+        _ = try lru.set(page_stat.page_offset, page); // 2 mem copy
 
         // TODO: have a bunch of parallel workers to do this (page-level mutex)
-        try self._write_page_disk(page_stat.page_offset, page_ptr.*);
+        try self._write_page_disk(page_stat.page_offset, page);
     }
 
-    pub fn append_write_value(self: *StorageManager, buf: []const u8) !u64 {
-        try self.write_value(self._size, buf);
-        const val_offset = self._size;
-        self._size += buf.len;
+    /// finds a free space or writes ahead of the current cursor. returns value_offset the buffer was written at.
+    pub fn save_value(self: *StorageManager, buf: []const u8) !u64 {
+        const fst = self._fst.?;
 
-        return val_offset;
+        var write_offset: u64 = undefined;
+        const alloc_val = try fst.find_allocate(buf.len);
+        if (alloc_val) |val_metadata| {
+            write_offset = val_metadata.value_offset;
+        } else {
+            write_offset = fst.get_cursor();
+        }
+
+        try self.write_value(write_offset, buf);
+        try fst.increment_cursor(buf.len);
+
+        return write_offset;
     }
 
     pub fn read_page(self: *StorageManager, page_offset: u64) !Page {
-        const lru = self._lru.?;
+        var lru = self._lru.?;
 
         const page_ptr_lru = lru.get(page_offset);
         if (page_ptr_lru) |_page_ptr| {
@@ -132,8 +152,8 @@ pub const StorageManager = struct {
         }
 
         const disk_page = try self._read_page_disk(page_offset);
-        const page_ptr = try lru.set(page_offset, disk_page.buf);
-        return page_ptr.*;
+        const page = try lru.set(page_offset, disk_page.buf);
+        return page;
     }
 
     pub fn read_value(self: *StorageManager, val_offset: u64, val_size: u64) ![]const u8 {
