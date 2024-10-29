@@ -100,7 +100,8 @@ pub fn LRUCache(comptime K: type, comptime V: type) type {
             self.head = node;
         }
 
-        pub fn set(self: *@This(), m_key: K, m_value: V) !V {
+        /// sets the m_key to m_value in map. returns a value if there was a value at m_key previously.
+        pub fn set(self: *@This(), m_key: K, m_value: V) !?V {
             var m = self._map.?;
 
             if (self._size >= self.capacity) {
@@ -121,11 +122,13 @@ pub fn LRUCache(comptime K: type, comptime V: type) type {
                 self._size -= 1;
             }
 
+            var prev_v: ?V = null;
             const prev_kv = try m.fetchPut(m_key, m_value);
             const val_ptr = m.getPtr(m_key).?;
 
             var node_ptr: *LRUNode(K, V) = undefined;
             if (prev_kv) |kv| {
+                prev_v = kv.value;
                 if (self._get_node(kv.key)) |node| {
                     node_ptr = node;
                     node_ptr.m_val_ptr = val_ptr;
@@ -148,7 +151,7 @@ pub fn LRUCache(comptime K: type, comptime V: type) type {
 
             self._push_to_top(node_ptr);
 
-            return val_ptr.*;
+            return prev_v;
         }
 
         pub fn get(self: *@This(), m_key: K) ?V {

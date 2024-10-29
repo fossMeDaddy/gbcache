@@ -161,11 +161,10 @@ pub const FreeSpaceTracker = struct {
         _ = try self._write_cur_disk();
     }
 
+    /// if val_metadata.value_size is received, this blows up.
     pub fn log_free_space(self: *FreeSpaceTracker, val_metadata: lib.types.ValueMetadata) !void {
-        if (val_metadata.value_size < 1) {
-            return;
-        }
-
+        std.debug.print("FREE SPACE LOGGED at {}, size: {}\n", .{ val_metadata.value_offset, val_metadata.value_size });
+        lib.assert(val_metadata.value_size > 0);
         var spots = self._spots.?;
 
         const insert_i = self._get_insert_index_asc_order(val_metadata);
@@ -177,6 +176,10 @@ pub const FreeSpaceTracker = struct {
 
     /// finds a free space, allocates the free space and logs the remaining space back
     pub fn find_allocate(self: *FreeSpaceTracker, min_bytes: u64) !?lib.types.ValueMetadata {
+        if (min_bytes == 0) {
+            return error.InvalidAllocationRequested;
+        }
+
         const spots = self._spots.?;
 
         const free_i = self._get_free_space(min_bytes);
@@ -186,7 +189,11 @@ pub const FreeSpaceTracker = struct {
 
             val_metadata.value_offset += min_bytes;
             val_metadata.value_size -= min_bytes;
-            try self.log_free_space(val_metadata);
+
+            std.debug.print("FREE SPACE ALLOCATED at {}, size: {}\n", .{ alloc_space.value_offset, alloc_space.value_size });
+            if (val_metadata.value_size > 0) {
+                try self.log_free_space(val_metadata);
+            }
 
             return alloc_space;
         }

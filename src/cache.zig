@@ -1,36 +1,56 @@
 const std = @import("std");
 
-const key_storage = @import("./key_storage.zig");
-const val_storage = @import("./val_storage.zig");
+const modks = @import("./key_storage.zig");
+const modvs = @import("./val_storage.zig");
+const modfst = @import("./fst.zig");
 
-var key_manager: ?*key_storage.StorageManager = null;
-var val_manager: ?*val_storage.StorageManager = null;
+var key_manager: ?*modks.StorageManager = null;
+var val_manager: ?*modvs.StorageManager = null;
+var fs_tracker: ?*modfst.FreeSpaceTracker = null;
 
 var gpa = std.heap.GeneralPurposeAllocator(.{}){};
 const allocator = gpa.allocator();
 
 pub fn init(capacity: u64, absolute_path: []const u8) !void {
-    const km = try allocator.create(key_storage.StorageManager);
-    km.* = key_storage.StorageManager{
+    const fst = try allocator.create(modfst.FreeSpaceTracker);
+    fst.* = modfst.FreeSpaceTracker{ .absolute_path = absolute_path, .allocator = allocator };
+    try fst.init();
+
+    const km = try allocator.create(modks.StorageManager);
+    km.* = modks.StorageManager{
         .capacity = capacity,
         .absolute_path = absolute_path,
+        .fst = fst,
     };
-
-    const vm = try allocator.create(val_storage.StorageManager);
-    vm.* = val_storage.StorageManager{
-        .absolute_path = absolute_path,
-    };
-
     try km.init();
+
+    const vm = try allocator.create(modvs.StorageManager);
+    vm.* = modvs.StorageManager{
+        .absolute_path = absolute_path,
+        .fst = fst,
+    };
     try vm.init();
 
     key_manager = km;
     val_manager = vm;
+    fs_tracker = fst;
+
+    std.debug.print("\nFREE SPACE TRACKER STATUS\n", .{});
+    std.debug.print("{any}\n{any}\n\n", .{ fst.get_cursor(), fst._spots.?.items });
 }
 
 pub fn deinit() void {
-    allocator.destroy(key_manager);
-    allocator.destroy(val_manager);
+    const km = key_manager.?;
+    const vm = val_manager.?;
+    const fst = fs_tracker.?;
+
+    km.deinit();
+    vm.deinit();
+    fst.deinit();
+
+    allocator.destroy(km);
+    allocator.destroy(vm);
+    allocator.destroy(fst);
 
     // TODO: call deinit on key & val managers also
 }
@@ -51,8 +71,8 @@ pub fn get(key_str: []const u8) !?[]const u8 {
 pub fn set(key_str: []const u8, val_buf: []const u8) !void {
     var km = key_manager.?;
     var vm = val_manager.?;
-    std.debug.print("SET : {*}, {*}\n", .{ &km, &vm });
 
+    _ = try km.get(key_str);
     const value_offset = try vm.save_value(val_buf);
     try km.set(key_str, .{
         .value_offset = value_offset,

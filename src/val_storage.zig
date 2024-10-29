@@ -10,13 +10,13 @@ var gpa = std.heap.GeneralPurposeAllocator(.{}){};
 pub const StorageManager = struct {
     absolute_path: []const u8,
     bin_filename: []const u8 = "data.bin",
+    fst: *fs_tracker.FreeSpaceTracker,
 
     _file: ?std.fs.File = null,
     _mem_alloc: std.mem.Allocator = gpa.allocator(),
     _val_storage_path: ?[]const u8 = null,
 
     _lru: ?*lru_cache.LRUCache(u64, Page) = null,
-    _fst: ?*fs_tracker.FreeSpaceTracker = null,
 
     pub fn init(self: *StorageManager) !void {
         if (self._file) |file| {
@@ -33,17 +33,9 @@ pub const StorageManager = struct {
         };
         try lru.init();
 
-        const fst = try self._mem_alloc.create(fs_tracker.FreeSpaceTracker);
-        fst.* = fs_tracker.FreeSpaceTracker{
-            .absolute_path = self.absolute_path,
-            .allocator = self._mem_alloc,
-        };
-        try fst.init();
-
         self._file = result.file;
         self._val_storage_path = val_storage_path;
         self._lru = lru;
-        self._fst = fst;
 
         if (!result.created) {}
     }
@@ -127,18 +119,18 @@ pub const StorageManager = struct {
 
     /// finds a free space or writes ahead of the current cursor. returns value_offset the buffer was written at.
     pub fn save_value(self: *StorageManager, buf: []const u8) !u64 {
-        const fst = self._fst.?;
-
         var write_offset: u64 = undefined;
-        const alloc_val = try fst.find_allocate(buf.len);
+        var _append = true;
+        const alloc_val = try self.fst.find_allocate(buf.len);
         if (alloc_val) |val_metadata| {
             write_offset = val_metadata.value_offset;
+            _append = false;
         } else {
-            write_offset = fst.get_cursor();
+            write_offset = self.fst.get_cursor();
         }
 
         try self.write_value(write_offset, buf);
-        try fst.increment_cursor(buf.len);
+        if (_append) try self.fst.increment_cursor(buf.len);
 
         return write_offset;
     }
@@ -152,8 +144,8 @@ pub const StorageManager = struct {
         }
 
         const disk_page = try self._read_page_disk(page_offset);
-        const page = try lru.set(page_offset, disk_page.buf);
-        return page;
+        _ = try lru.set(page_offset, disk_page.buf);
+        return disk_page.buf;
     }
 
     pub fn read_value(self: *StorageManager, val_offset: u64, val_size: u64) ![]const u8 {

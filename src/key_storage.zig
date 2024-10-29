@@ -1,6 +1,7 @@
 const std = @import("std");
 const lib = @import("lib.zig");
 const lru_cache = @import("lru.zig");
+const fs_tracker = @import("fst.zig");
 
 var gpa = std.heap.GeneralPurposeAllocator(.{}){};
 
@@ -22,6 +23,7 @@ pub const StorageManager = struct {
     max_bucket_size: u16 = 15,
     absolute_path: []const u8,
     bin_filename: []const u8 = "buckets.bin",
+    fst: *fs_tracker.FreeSpaceTracker,
 
     _file: ?std.fs.File = null,
     _bucket_offset: u64 = 0,
@@ -136,8 +138,8 @@ pub const StorageManager = struct {
         }
 
         try file.seekTo(write_key_offset);
+
         const key_buf = std.mem.toBytes(key);
-        std.debug.print("key_buf: {any}\n", .{key_buf});
         const b_write = try file.write(&key_buf);
         std.debug.assert(b_write == key_buf.len);
 
@@ -147,17 +149,16 @@ pub const StorageManager = struct {
     pub fn get(self: *StorageManager, key_str: []const u8) !?Key {
         var lru = self._lru.?;
 
-        var key: Key = undefined;
-        if (lru.get(key_str)) |key_ptr_lru| {
-            return key_ptr_lru;
-        } else {
-            const key_hash = lru.gen_key_hash(key_str);
-            const _key = try self._get_key_disk(key_hash);
-            if (_key) |k| {
-                key = try lru.set(key_str, k);
-            } else {
-                return null;
-            }
+        var key: ?Key = null;
+        if (lru.get(key_str)) |key_lru| {
+            return key_lru;
+        }
+
+        const key_hash = lru.gen_key_hash(key_str);
+        const _key = try self._get_key_disk(key_hash);
+        if (_key) |k| {
+            _ = try lru.set(key_str, k);
+            key = k;
         }
 
         return key;
@@ -172,7 +173,12 @@ pub const StorageManager = struct {
             .value_size = value_metadata.value_size,
         };
 
-        _ = try lru.set(key_str, key);
+        const prev_k = try lru.set(key_str, key);
+        std.debug.print("LRU set: {any}\n", .{key});
+        if (prev_k) |k| {
+            std.debug.print("k: {any}\n", .{k});
+            try self.fst.log_free_space(.{ .value_offset = k.value_offset, .value_size = k.value_size });
+        }
 
         // TODO: spawn a thread to keep the disk updated
         // (batch updates would work, NOPE, RWLOCK on file almost-immediate syncing will, i mean should...)

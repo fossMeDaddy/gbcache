@@ -4,27 +4,12 @@ const root = @import("./root.zig");
 var gpa = std.heap.GeneralPurposeAllocator(.{}){};
 var allocator = gpa.allocator();
 
-pub fn main() void {
-    // const cap = 10_000;
-    // const abs_path = try std.fs.realpathAlloc(allocator, "./tmp/data");
-    // defer allocator.free(abs_path);
-    //
-    // try root.cache.init(cap, abs_path);
-    //
-    // try root.cache.set("HALO", "abc---1");
-    // try root.cache.set("HALO2", "abc##2");
-    //
-    // const val = try root.cache.get("HALO");
-    //
-    // try std.testing.expectEqualStrings("abc---1", val.?);
-}
-
-test "main test" {
-    const test_alloc = std.testing.allocator;
+pub fn main() !void {
+    // const allocator = std.testing.allocator;
 
     const cap = 10_000;
-    const abs_path = try std.fs.realpathAlloc(test_alloc, "./tmp/data");
-    defer test_alloc.free(abs_path);
+    const abs_path = try std.fs.realpathAlloc(allocator, "./tmp/data");
+    defer allocator.free(abs_path);
 
     try root.cache.init(cap, abs_path);
 
