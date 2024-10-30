@@ -1,6 +1,6 @@
 # GBCache [WIP]
 
-well, you can just call it Giga-Byte Cache because the actual expansion is too dirty, even for me.
+Giga-Byte Cache.
 
 ## Basic Idea
 
