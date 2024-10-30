@@ -16,3 +16,12 @@ progress:
 - [ ] multi-threading (god save me, except there is no god, it's all lost & hopeless)
 - [ ] WAL file write & recovery for those of you with nastier kinks for your databases
 - [ ] backups, cuz yes.
+
+## Comments on Zig
+- error handling, i think all the languages should adopt errors as values already
+- explicitness, love it, no allocator? no heap!
+- comptime, *chef's kiss*
+- tests, it's actually convenient, just define a test block wherever you want!
+- standard library, fucking A
+
+I haven't found anything negative about Zig, yet.
