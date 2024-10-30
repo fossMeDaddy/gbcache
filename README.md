@@ -5,7 +5,7 @@ well, you can just call it Giga-Byte Cache because the actual expansion is too d
 ## Basic Idea
 
 In-memory key-value pair LRU cache on top of structured data stored on local disk.
-> A giant complicated fucking map
+> A giant fucking complicated map
 
 progress:
 - [x] lru, in-memory read/writes
