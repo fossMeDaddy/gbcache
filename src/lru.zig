@@ -2,13 +2,15 @@ const std = @import("std");
 
 pub fn LRUNode(comptime K: type, comptime V: type) type {
     return struct {
+        const Self = @This();
+
         /// map key for lookup
         m_key: K,
         /// map value against the 'm_key' pointer
         m_val_ptr: *V,
 
-        next: ?*@This(),
-        prev: ?*@This(),
+        next: ?*Self,
+        prev: ?*Self,
     };
 }
 
@@ -33,9 +35,10 @@ pub fn LRUCache(comptime K: type, comptime V: type) type {
         _map: ?*LRUCacheMapType(K, V) = null,
         _size: u64 = 0,
         _map_ctx: LRUCacheMapContext(K) = LRUCacheMapContext(K){},
-        // _thread_pool: std.Thread.Pool = std.Thread.Pool{},
 
-        pub fn init(self: *@This()) !void {
+        const Self = @This();
+
+        pub fn init(self: *Self) !void {
             const m = try self.allocator.create(LRUCacheMapType(K, V));
             m.* = LRUCacheMapType(K, V).init(self.allocator);
             self._map = m;
@@ -43,24 +46,33 @@ pub fn LRUCache(comptime K: type, comptime V: type) type {
             if (self.capacity < 1) {
                 return error.ZeroCapacity;
             }
-
-            // try self._thread_pool.init(.{
-            //     .allocator = self.allocator,
-            //     .n_jobs = self.concurrency,
-            // });
         }
 
-        pub fn eql_keys(self: @This(), k1: K, k2: K) bool {
+        pub fn eql_keys(self: Self, k1: K, k2: K) bool {
             return self._map_ctx.eql(k1, k2);
         }
 
-        pub fn gen_key_hash(self: @This(), k: K) u64 {
+        pub fn gen_key_hash(self: Self, k: K) u64 {
             return self._map_ctx.hash(k);
         }
 
-        fn _get_node(self: *@This(), m_key: K) ?*LRUNode(K, V) {
-            std.debug.print("_get_node m_key: {any}\n", .{m_key});
+        fn _mem_cpy_key(self: *Self, key: K) std.mem.Allocator.Error!K {
+            switch (K) {
+                []const u8 => {
+                    const key_str: []u8 = @ptrCast(@constCast(key));
+                    const key_alloc = try self.allocator.alloc(u8, key_str.len);
+                    @memcpy(key_alloc, key_str);
 
+                    return key_alloc;
+                },
+
+                else => {
+                    return key;
+                },
+            }
+        }
+
+        fn _get_node(self: *Self, m_key: K) ?*LRUNode(K, V) {
             var cur_node = self.head;
             while (cur_node) |node| {
                 if (self.eql_keys(node.m_key, m_key)) {
@@ -70,11 +82,10 @@ pub fn LRUCache(comptime K: type, comptime V: type) type {
                 cur_node = node.next;
             }
 
-            std.debug.print("found: {any}\n", .{m_key});
             return cur_node;
         }
 
-        fn _push_to_top(self: *@This(), node: *LRUNode(K, V)) void {
+        fn _push_to_top(self: *Self, node: *LRUNode(K, V)) void {
             if (node == self.head) {
                 return;
             }
@@ -100,48 +111,53 @@ pub fn LRUCache(comptime K: type, comptime V: type) type {
             self.head = node;
         }
 
+        fn _remove_node(self: *Self, node: *LRUNode(K, V)) void {
+            defer self.allocator.destroy(node);
+
+            if (node.next) |node_next| {
+                node_next.prev = node.prev;
+            }
+            if (node.prev) |node_prev| {
+                node_prev.next = node.next;
+            }
+
+            if (node == self.head) {
+                self.head = node.next;
+            }
+            if (node == self.tail) {
+                self.tail = node.prev;
+            }
+        }
+
         /// sets the m_key to m_value in map. returns a value if there was a value at m_key previously.
-        pub fn set(self: *@This(), m_key: K, m_value: V) !?V {
+        pub fn set(self: *Self, m_key: K, m_value: V) !void {
             var m = self._map.?;
 
             if (self._size >= self.capacity) {
                 const tail = self.tail.?;
-                defer self.allocator.destroy(tail);
+                defer self._remove_node(tail);
 
                 const removed = m.remove(tail.m_key);
                 std.debug.assert(removed);
 
-                if (tail == self.head) {
-                    self.head = null;
-                }
-                if (tail.prev) |prev| {
-                    prev.next = null;
-                }
-                self.tail = tail.prev;
-
                 self._size -= 1;
             }
 
-            var prev_v: ?V = null;
-            const prev_kv = try m.fetchPut(m_key, m_value);
-            const val_ptr = m.getPtr(m_key).?;
+            const m_key_cpy = try self._mem_cpy_key(m_key);
+
+            const entry = try m.getOrPut(m_key_cpy);
+            const new_val_ptr = entry.value_ptr;
+            entry.value_ptr.* = m_value;
 
             var node_ptr: *LRUNode(K, V) = undefined;
-            if (prev_kv) |kv| {
-                prev_v = kv.value;
-                if (self._get_node(kv.key)) |node| {
-                    node_ptr = node;
-                    node_ptr.m_val_ptr = val_ptr;
-                } else {
-                    std.debug.print("existing KV: {any}\n", .{kv});
-                    std.debug.print("this KV was NOT FOUND with _get_node function!!! this should not happen, CRASHING THE PROGRAM...\n", .{});
-                    unreachable;
-                }
+            if (self._get_node(m_key_cpy)) |node| {
+                node_ptr = node;
+                node_ptr.m_val_ptr = new_val_ptr;
             } else {
                 node_ptr = try self.allocator.create(LRUNode(K, V));
                 node_ptr.* = LRUNode(K, V){
-                    .m_key = m_key,
-                    .m_val_ptr = val_ptr,
+                    .m_key = m_key_cpy,
+                    .m_val_ptr = new_val_ptr,
                     .next = null,
                     .prev = null,
                 };
@@ -150,11 +166,9 @@ pub fn LRUCache(comptime K: type, comptime V: type) type {
             }
 
             self._push_to_top(node_ptr);
-
-            return prev_v;
         }
 
-        pub fn get(self: *@This(), m_key: K) ?V {
+        pub fn get(self: *Self, m_key: K) ?V {
             const m = self._map.?;
 
             const node = self._get_node(m_key);
@@ -163,6 +177,27 @@ pub fn LRUCache(comptime K: type, comptime V: type) type {
             }
 
             return m.get(m_key);
+        }
+
+        pub fn remove(self: *Self, m_key: K) ?V {
+            const m = self._map.?;
+
+            var prev_v: ?V = null;
+            if (m.fetchRemove(m_key)) |prev_kv| {
+                prev_v = prev_kv.value;
+            } else {
+                return null;
+            }
+
+            const _node = self._get_node(m_key);
+            if (_node == null) {
+                return null;
+            }
+            const node = _node.?;
+            self._remove_node(node);
+
+            self._size -= 1;
+            return prev_v;
         }
     };
 }
@@ -183,8 +218,10 @@ fn _test_print_map_stat(m: *std.AutoHashMap(u64, []const u8)) void {
     std.debug.print("len: {any}, unmanaged_size: {any}\n", .{ m.count(), m.unmanaged.size });
 }
 
-test "lru cache" {
+test "LRU" {
     const test_alloc = std.testing.allocator;
+    // var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    // const test_alloc = gpa.allocator();
 
     var lru = LRUCache(u64, []const u8){
         .capacity = 5,
@@ -205,10 +242,12 @@ test "lru cache" {
     const v3 = lru.get(3);
     const v2 = lru.get(2);
     const v1 = lru.get(1);
+    const v2_r = lru.remove(2);
 
     try std.testing.expectEqualStrings(v2.?, "TWO!");
     try std.testing.expectEqual(v1, null);
     try std.testing.expectEqualStrings(v3.?, "three");
+    try std.testing.expectEqual("TWO!", v2_r.?);
 
     var lru_str = LRUCache([]const u8, u64){
         .capacity = 3,

@@ -97,7 +97,9 @@ pub const StorageManager = struct {
         try file.sync();
     }
 
-    fn write_value(self: *StorageManager, val_offset: u64, buf: []const u8) !void {
+    /// unless absolutely necessary, DO NOT CALL THIS FUNCTION DIRECTLY.
+    /// use `save_value` instead
+    pub fn write_value(self: *StorageManager, val_offset: u64, buf: []const u8) !void {
         var lru = self._lru.?;
 
         const page_stat = self._get_page_stat(val_offset);
@@ -150,8 +152,11 @@ pub const StorageManager = struct {
 
     pub fn read_value(self: *StorageManager, val_offset: u64, val_size: u64) ![]const u8 {
         const page_stat = self._get_page_stat(val_offset);
-        const page = try self.read_page(page_stat.page_offset);
+        if (page_stat.cur + val_size > @sizeOf(Page)) {
+            return error.ReadingOutOfBoundsPage;
+        }
 
+        const page = try self.read_page(page_stat.page_offset);
         return page[page_stat.cur .. page_stat.cur + val_size];
     }
 };

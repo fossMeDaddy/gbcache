@@ -10,7 +10,7 @@ pub const Key = struct {
     value_offset: u64,
     value_size: u64,
 
-    pub fn isZero(self: Key) bool {
+    pub fn is_zero(self: Key) bool {
         return self.value_size == 0 and self.value_offset == 0 and self.key_hash == 0;
     }
 };
@@ -19,8 +19,8 @@ pub const Errors = error{
     KeyNotFound,
 };
 pub const StorageManager = struct {
-    capacity: u64 = 1000,
-    max_bucket_size: u16 = 15,
+    capacity: u64 = 100_000,
+    max_bucket_size: u16 = 10,
     absolute_path: []const u8,
     bin_filename: []const u8 = "buckets.bin",
     fst: *fs_tracker.FreeSpaceTracker,
@@ -73,6 +73,7 @@ pub const StorageManager = struct {
         }
     }
 
+    /// dynamically allocates a bucket buffer, caller is responsible for freeing the bucket buffer.
     fn _get_bucket_disk(self: *StorageManager, key_hash: u64) !struct { buf: []u8, offset: u64 } {
         const file = self._file.?;
 
@@ -97,8 +98,6 @@ pub const StorageManager = struct {
             const key = lib.ptrs.bufToType(Key, key_buf);
 
             if (key.key_hash == key_hash) {
-                std.debug.print("matched hash key_buf ({}): {any}\n", .{ bucket.offset, key_buf });
-                std.debug.print("matched hash key: {any}\n", .{key});
                 return key;
             }
         }
@@ -106,10 +105,14 @@ pub const StorageManager = struct {
         return null;
     }
 
-    fn _set_key_disk(self: *StorageManager, key: Key) !void {
+    /// asserts either `key.hash == key_hash` OR `key.is_zero()`
+    /// assume this to be deletion operation of key at key_hash in case `key.is_zero()`
+    fn _set_key_disk(self: *StorageManager, key_hash: u64, key: Key) !void {
+        lib.assert(key_hash == key.key_hash or key.is_zero());
+
         const file = self._file.?;
 
-        const bucket = try self._get_bucket_disk(key.key_hash);
+        const bucket = try self._get_bucket_disk(key_hash);
         defer self._mem_alloc.free(bucket.buf);
 
         var write_key_offset: u64 = undefined;
@@ -119,13 +122,13 @@ pub const StorageManager = struct {
             const key_buf = bucket.buf[start .. start + @sizeOf(Key)];
             const k = lib.ptrs.bufToType(Key, key_buf);
 
-            if (k.key_hash == key.key_hash) {
+            if (key_hash == k.key_hash) {
                 write_key_offset = bucket.offset + start;
                 _write_key_offset_set = true;
                 break;
             }
 
-            if (!_write_key_offset_set and k.isZero()) {
+            if (!_write_key_offset_set and k.is_zero()) {
                 write_key_offset = bucket.offset + start;
                 _write_key_offset_set = true;
             }
@@ -146,20 +149,29 @@ pub const StorageManager = struct {
         try file.sync();
     }
 
-    pub fn get(self: *StorageManager, key_str: []const u8) !?Key {
+    /// NOTE: I BEG YOU please ensure `key_hash = lru.gen_key_hash(key_str)`
+    fn _get_key(self: *StorageManager, key_str: []const u8, key_hash: u64) !?Key {
         var lru = self._lru.?;
 
-        var key: ?Key = null;
         if (lru.get(key_str)) |key_lru| {
             return key_lru;
         }
 
-        const key_hash = lru.gen_key_hash(key_str);
+        var key: ?Key = null;
         const _key = try self._get_key_disk(key_hash);
         if (_key) |k| {
-            _ = try lru.set(key_str, k);
+            try lru.set(key_str, k);
             key = k;
         }
+
+        return key;
+    }
+
+    pub fn get(self: *StorageManager, key_str: []const u8) !?Key {
+        const lru = self._lru.?;
+
+        const key_hash = lru.gen_key_hash(key_str);
+        const key = self._get_key(key_str, key_hash);
 
         return key;
     }
@@ -167,22 +179,36 @@ pub const StorageManager = struct {
     pub fn set(self: *StorageManager, key_str: []const u8, value_metadata: lib.types.ValueMetadata) !void {
         var lru = self._lru.?;
 
+        const key_hash = lru.gen_key_hash(key_str);
         const key = Key{
-            .key_hash = lru.gen_key_hash(key_str),
+            .key_hash = key_hash,
             .value_offset = value_metadata.value_offset,
             .value_size = value_metadata.value_size,
         };
 
-        const prev_k = try lru.set(key_str, key);
-        std.debug.print("LRU set: {any}\n", .{key});
+        // NOTE: please do not remove this line AS previous value from lru.set might not reflect the truth in DISK!
+        const prev_k = try self._get_key(key_str, key_hash);
+        try lru.set(key_str, key);
         if (prev_k) |k| {
-            std.debug.print("k: {any}\n", .{k});
             try self.fst.log_free_space(.{ .value_offset = k.value_offset, .value_size = k.value_size });
         }
 
         // TODO: spawn a thread to keep the disk updated
         // (batch updates would work, NOPE, RWLOCK on file almost-immediate syncing will, i mean should...)
-        try self._set_key_disk(key);
+        try self._set_key_disk(key_hash, key);
+    }
+
+    pub fn remove(self: *StorageManager, key_str: []const u8) !void {
+        var lru = self._lru.?;
+
+        const key_hash = lru.gen_key_hash(key_str);
+
+        try self._set_key_disk(key_hash, Key{ .key_hash = 0, .value_size = 0, .value_offset = 0 });
+        const r_key = lru.remove(key_str);
+
+        if (r_key) |k| {
+            try self.fst.log_free_space(.{ .value_offset = k.value_offset, .value_size = k.value_size });
+        }
     }
 
     // pub fn set(self: KeyStorageManager, key: Key) !void {}

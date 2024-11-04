@@ -163,7 +163,6 @@ pub const FreeSpaceTracker = struct {
 
     /// if val_metadata.value_size is received, this blows up.
     pub fn log_free_space(self: *FreeSpaceTracker, val_metadata: lib.types.ValueMetadata) !void {
-        std.debug.print("FREE SPACE LOGGED at {}, size: {}\n", .{ val_metadata.value_offset, val_metadata.value_size });
         lib.assert(val_metadata.value_size > 0);
         var spots = self._spots.?;
 
@@ -190,7 +189,6 @@ pub const FreeSpaceTracker = struct {
             val_metadata.value_offset += min_bytes;
             val_metadata.value_size -= min_bytes;
 
-            std.debug.print("FREE SPACE ALLOCATED at {}, size: {}\n", .{ alloc_space.value_offset, alloc_space.value_size });
             if (val_metadata.value_size > 0) {
                 try self.log_free_space(val_metadata);
             }
@@ -242,6 +240,7 @@ test "FST" {
 
     const prev_cur = fst._cur;
     const prev_spots_arr = try fst._spots.?.toOwnedSlice();
+    defer test_alloc.free(prev_spots_arr);
 
     fst.deinit();
     try fst.init();
