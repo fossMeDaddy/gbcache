@@ -1,0 +1,1 @@
+pub const ENV_ENC_KEY_KEY = "ENCRYPTION_KEY";

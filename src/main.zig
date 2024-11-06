@@ -1,5 +1,7 @@
 const std = @import("std");
 const root = @import("./root.zig");
+const lib = @import("./lib.zig");
+const constants = @import("./constants.zig");
 
 var gpa = std.heap.GeneralPurposeAllocator(.{}){};
 var allocator = gpa.allocator();
@@ -41,7 +43,7 @@ const Command = struct {
 
 // TODO: use this when need to keep the connections open!
 //
-/// read the stream until '\r\n\r\n'
+// /// read the stream until '\r\n\r\n'
 // fn read_until_eor(mem_alloc: std.mem.Allocator, stream: net.Stream) ![]const u8 {
 //     var stream_data = try std.ArrayList(u8).initCapacity(mem_alloc, 1024);
 //
@@ -66,7 +68,16 @@ fn read_stream_into_command(mem_alloc: std.mem.Allocator, stream: net.Stream) !_
     const reader = stream.reader();
 
     var commands = std.ArrayList(Command).init(mem_alloc);
-    const stream_data = try reader.readAllAlloc(mem_alloc, 512 * 1024);
+
+    const _stream_data = try reader.readAllAlloc(mem_alloc, 512 * 1024);
+
+    var stream_data: []u8 = undefined;
+    if (lib.env.get_key()) |key| {
+        stream_data = try lib.crypto.decrypt_buffer(mem_alloc, _stream_data, key);
+        mem_alloc.free(_stream_data);
+    } else {
+        stream_data = _stream_data;
+    }
 
     var iter = std.mem.splitSequence(u8, stream_data, ResponseSplit);
     while (iter.next()) |command_buf| {
@@ -85,20 +96,33 @@ fn read_stream_into_command(mem_alloc: std.mem.Allocator, stream: net.Stream) !_
         });
     }
 
-    const owned_commands = try commands.toOwnedSlice();
-    const _stream_data = _StreamData{ .commands = owned_commands, .stream_data = stream_data };
-    return _stream_data;
+    const commands_owned = try commands.toOwnedSlice();
+    return .{ .commands = commands_owned, .stream_data = stream_data };
+}
+
+fn stream_write_buffer(mem_alloc: std.mem.Allocator, stream: net.Stream, buf: []const u8) !void {
+    if (lib.env.get_key()) |key| {
+        const stream_buf = try lib.crypto.encrypt_buffer(mem_alloc, buf, key);
+        defer mem_alloc.free(stream_buf);
+
+        _ = try stream.write(stream_buf);
+    } else {
+        _ = try stream.write(buf);
+    }
 }
 
 pub fn main() !void {
+    try lib.env.load_dotenv(allocator);
+    try lib.env.validate();
+
     const abs_path = try std.fs.realpathAlloc(allocator, "./tmp/data");
     try root.cache.init(100_000, abs_path);
 
     const address = try net.Address.parseIp4("0.0.0.0", 8080);
     var server = try address.listen(.{});
 
+    std.debug.print("SERVER READY: port -> 8080\n", .{});
     while (true) {
-        std.debug.print("SERVER READY: port -> 8080\n", .{});
         const c = try server.accept();
         const stream_data = try read_stream_into_command(allocator, c.stream);
         defer allocator.free(stream_data.stream_data);
@@ -107,7 +131,7 @@ pub fn main() !void {
         for (stream_data.commands) |command| {
             switch (command.cmd) {
                 .ping => {
-                    _ = try c.stream.write("PONG");
+                    _ = try stream_write_buffer(allocator, c.stream, "PONG");
                 },
 
                 .get => {
@@ -119,7 +143,7 @@ pub fn main() !void {
 
                     const value = try root.cache.get(key);
                     if (value) |val_buf| {
-                        _ = try c.stream.write(val_buf);
+                        _ = try stream_write_buffer(allocator, c.stream, val_buf);
                     }
                 },
 
@@ -150,7 +174,7 @@ pub fn main() !void {
                     }
 
                     const result = try root.cache.increment(key, inc_by);
-                    _ = try c.stream.write(&std.mem.toBytes(result));
+                    _ = try stream_write_buffer(allocator, c.stream, &std.mem.toBytes(result));
                 },
 
                 .del => {
@@ -163,11 +187,11 @@ pub fn main() !void {
                     try root.cache.remove(key);
                 },
             }
-            _ = try c.stream.write(ResponseSplit);
+            _ = try stream_write_buffer(allocator, c.stream, ResponseSplit);
         }
 
         // NOTE: response ends with '\r\n\r\n'
-        _ = try c.stream.write(ResponseSplit);
+        _ = try stream_write_buffer(allocator, c.stream, ResponseSplit);
 
         // TODO: when connection is persistent, remove this
         c.stream.close();
