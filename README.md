@@ -11,7 +11,9 @@ progress:
 - [x] lru, in-memory read/writes
 - [x] sync to disk
 - [x] get, set, delete commands
-- [ ] increment command
+- [x] increment command
+- [x] server: make the damn thing
+- [x] server: opt-in end-end AES256 encryption
 - [ ] TTL (more general, scheduled command runs, doesn't necessarily have to be a delete)
 - [ ] multi-threading (god save me, except there is no god, it's all lost & hopeless)
 - [ ] WAL file write & recovery for those of you with nastier kinks for your databases
