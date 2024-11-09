@@ -19,7 +19,7 @@ pub fn init(capacity: u64, absolute_path: []const u8) !void {
 
     const km = try allocator.create(modks.StorageManager);
     km.* = modks.StorageManager{
-        .capacity = capacity,
+        .init_capacity = capacity,
         .absolute_path = absolute_path,
         .fst = fst,
     };
