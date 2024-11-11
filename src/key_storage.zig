@@ -129,16 +129,6 @@ pub const StorageManager = struct {
         }
     }
 
-    /// lock resize mutex ONLY IF resize in progress
-    fn _check_lock_resize_mutex(self: *StorageManager) void {
-        if (self._resizing_in_progress.load(.seq_cst)) self._resize_mutex.lock();
-    }
-
-    /// unlock resize mutex ONLY IF resize in progress
-    fn _check_unlock_resize_mutex(self: *StorageManager) void {
-        if (self._resizing_in_progress.load(.seq_cst)) self._resize_mutex.unlock();
-    }
-
     fn _get_latest_bin_filename(self: *StorageManager) !struct { filename: []const u8, len: usize } {
         var filename: [100]u8 = undefined;
 
@@ -261,7 +251,7 @@ pub const StorageManager = struct {
         try new_file.sync();
 
         self._file = new_file;
-        _ = self._resizing_in_progress.swap(false, .seq_cst);
+        _ = self._resizing_in_progress.swap(false, .monotonic);
     }
 
     /// dynamically allocates a bucket buffer, caller is responsible for freeing the bucket buffer.
@@ -347,14 +337,16 @@ pub const StorageManager = struct {
         self._resize_mutex.lock();
         defer self._resize_mutex.unlock();
 
-        if (self._metadata.size_factor > self.resize_factor and !self._resizing_in_progress.load(.seq_cst)) {
-            _ = self._resizing_in_progress.swap(true, .seq_cst);
+        if (self._metadata.size_factor > self.resize_factor and !self._resizing_in_progress.load(.monotonic)) {
+            _ = self._resizing_in_progress.swap(true, .monotonic);
 
             const t = try std.Thread.spawn(.{}, _resize, .{self});
             t.detach();
         }
 
-        if (self._resizing_in_progress.load(.seq_cst)) {
+        if (self._resizing_in_progress.load(.monotonic)) {
+            // NOTE: this means while resizing is going on, if the server were to crash, WE ARE ABSOLUTELY FUCKED.
+
             const resize_actions_buffer = self._resize_actions_buffer.?;
             try resize_actions_buffer.append(SetKeyAction{
                 .key_hash = key_hash,
