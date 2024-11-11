@@ -1,6 +1,8 @@
 tmp/
 .zig-cache/
 
-main
-main.o
 .env
+
+*.exe
+*.bin
+*.o
