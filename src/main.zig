@@ -11,6 +11,7 @@ const net = std.net;
 pub const DataTokenSplit: u8 = 0x1e;
 pub const DataSplit: u8 = 0x1f;
 pub const DataEnd: u8 = 0x1d;
+/// even if the data is encrypted, this character is received as is.
 pub const StreamEnd: u8 = 0x04;
 
 const Cmd = enum(u8) {
@@ -46,35 +47,14 @@ const Command = struct {
     value: ?[]const u8 = null,
 };
 
-// TODO: use this when need to keep the connections open!
-//
-// /// read the stream until '\r\n\r\n'
-// fn read_until_eor(mem_alloc: std.mem.Allocator, stream: net.Stream) ![]const u8 {
-//     var stream_data = try std.ArrayList(u8).initCapacity(mem_alloc, 1024);
-//
-//     while (true) {
-//         var buf: [1024]u8 = undefined;
-//         const b_read = stream.read(&buf);
-//         if (b_read == 0) {
-//             break;
-//         }
-//
-//         const iter = std.mem.splitSequence(u8, buf[0..b_read], ResponseEnd);
-//         stream_data.appendSlice(iter.first());
-//     }
-//
-//     return stream_data;
-// }
-
 const _StreamData = struct { commands: []Command, stream_data: []u8 };
-
-/// NOTE: `.stream_data` and `.commands` has to be freed by the caller!
+///`.stream_data` and `.commands` must be freed by the caller!
 fn read_stream_into_command(mem_alloc: std.mem.Allocator, stream: net.Stream) !_StreamData {
     const reader = stream.reader();
 
     var commands = std.ArrayList(Command).init(mem_alloc);
 
-    const _stream_data = try reader.readAllAlloc(mem_alloc, 512 * 1024);
+    const _stream_data = try reader.readUntilDelimiterAlloc(mem_alloc, StreamEnd, 512 * 1024);
 
     var stream_data: []u8 = undefined;
     if (lib.env.get_key()) |key| {
@@ -219,9 +199,6 @@ pub fn main() !void {
         }
 
         _ = try stream_write_buffer(allocator, c.stream, &[_]u8{DataEnd});
-
-        // TODO: when connection is persistent, remove this
-        c.stream.close();
     }
 }
 
