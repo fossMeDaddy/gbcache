@@ -1,13 +1,21 @@
 const std = @import("std");
-
 const modks = @import("key_storage.zig");
 const modvs = @import("val_storage.zig");
 const modfst = @import("fst.zig");
+const modts = @import("time_scheduler.zig");
 const lib = @import("lib.zig");
+
+const ActionType = enum(u8) { del };
+const TimeSchedulerAction = modts.ScheduleAction(ActionType);
+const Ctx = struct {
+    km: *modks.StorageManager,
+};
+const TimeScheduler = modts.TimeScheduler(ActionType, _scheduler_callback, Ctx);
 
 var key_manager: ?*modks.StorageManager = null;
 var val_manager: ?*modvs.StorageManager = null;
 var fs_tracker: ?*modfst.FreeSpaceTracker = null;
+var time_scheduler: ?*TimeScheduler = null;
 
 var gpa = std.heap.GeneralPurposeAllocator(.{}){};
 const allocator = gpa.allocator();
@@ -32,9 +40,20 @@ pub fn init(capacity: u64, absolute_path: []const u8) !void {
     };
     try vm.init();
 
+    const ts = try allocator.create(TimeScheduler);
+    ts.* = TimeScheduler{
+        .allocator = allocator,
+        .absolute_path = absolute_path,
+        .ctx = Ctx{
+            .km = km,
+        },
+    };
+    try ts.init();
+
     key_manager = km;
     val_manager = vm;
     fs_tracker = fst;
+    time_scheduler = ts;
 }
 
 pub fn deinit() void {
@@ -80,6 +99,16 @@ pub fn set(key_str: []const u8, val_buf: []const u8) !void {
 pub fn remove(key_str: []const u8) !void {
     var km = key_manager.?;
     try km.remove(key_str);
+}
+
+pub fn set_expires_at(key_str: []const u8, timestamp_s: i64) !void {
+    var ts = time_scheduler.?;
+
+    try ts.schedule(TimeSchedulerAction{
+        .action_type = .del,
+        .timestamp_s = timestamp_s,
+        .dynamic_buf = key_str,
+    });
 }
 
 /// the value stored MUST BE of the size of either, 64, 32, 16 or 8 bits.
@@ -146,4 +175,12 @@ pub fn increment(key_str: []const u8, inc: u64) !u64 {
 
     try vm.write_value(key.value_offset, val_buf);
     return num;
+}
+
+fn _scheduler_callback(ctx: Ctx, action: TimeSchedulerAction) void {
+    switch (action.action_type) {
+        .del => {
+            ctx.km.remove(action.dynamic_buf) catch {};
+        },
+    }
 }

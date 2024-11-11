@@ -8,8 +8,10 @@ var allocator = gpa.allocator();
 
 const net = std.net;
 
-pub const ResponseSplit: []const u8 = "\r\n";
-pub const ResponseEnd: []const u8 = ResponseSplit ++ ResponseSplit;
+pub const DataTokenSplit: u8 = 0x1e;
+pub const DataSplit: u8 = 0x1f;
+pub const DataEnd: u8 = 0x1d;
+pub const StreamEnd: u8 = 0x04;
 
 const Cmd = enum(u8) {
     ping,
@@ -17,6 +19,7 @@ const Cmd = enum(u8) {
     set,
     del,
     inc,
+    exp,
 };
 
 fn string_to_cmd_enum(str: []const u8) ?Cmd {
@@ -30,9 +33,11 @@ fn string_to_cmd_enum(str: []const u8) ?Cmd {
         return Cmd.del;
     } else if (std.mem.eql(u8, str, "INC")) {
         return Cmd.inc;
+    } else if (std.mem.eql(u8, str, "EXP")) {
+        return Cmd.exp;
+    } else {
+        return null;
     }
-
-    return null;
 }
 
 const Command = struct {
@@ -79,9 +84,9 @@ fn read_stream_into_command(mem_alloc: std.mem.Allocator, stream: net.Stream) !_
         stream_data = _stream_data;
     }
 
-    var iter = std.mem.splitSequence(u8, stream_data, ResponseSplit);
+    var iter = std.mem.splitScalar(u8, stream_data, DataSplit);
     while (iter.next()) |command_buf| {
-        var command_buf_iter = std.mem.splitScalar(u8, command_buf, '\n');
+        var command_buf_iter = std.mem.splitScalar(u8, command_buf, DataTokenSplit);
 
         const _cmd_buf = command_buf_iter.first();
         const cmd = string_to_cmd_enum(_cmd_buf) orelse return error.InvalidCommand;
@@ -186,12 +191,34 @@ pub fn main() !void {
 
                     try root.cache.remove(key);
                 },
+
+                .exp => {
+                    if (command.key == null) {
+                        c.stream.close();
+                        break;
+                    }
+                    const key = command.key.?;
+
+                    var expires_at: i64 = undefined;
+                    if (command.value) |value| {
+                        if (value.len != @sizeOf(i64)) {
+                            c.stream.close();
+                            break;
+                        }
+
+                        expires_at = lib.ptrs.bufToType(i64, @constCast(value));
+                    } else {
+                        c.stream.close();
+                        break;
+                    }
+
+                    try root.cache.set_expires_at(key, expires_at);
+                },
             }
-            _ = try stream_write_buffer(allocator, c.stream, ResponseSplit);
+            _ = try stream_write_buffer(allocator, c.stream, &[_]u8{DataSplit});
         }
 
-        // NOTE: response ends with '\r\n\r\n'
-        _ = try stream_write_buffer(allocator, c.stream, ResponseSplit);
+        _ = try stream_write_buffer(allocator, c.stream, &[_]u8{DataEnd});
 
         // TODO: when connection is persistent, remove this
         c.stream.close();

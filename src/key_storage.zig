@@ -417,12 +417,11 @@ pub const StorageManager = struct {
         var lru = self._lru.?;
 
         const key_hash = lru.gen_key_hash(key_str);
-
-        try self._set_key_disk(key_hash, Key{ .key_hash = 0, .value_size = 0, .value_offset = 0 });
         const r_key = lru.remove(key_str);
 
         if (r_key) |k| {
             try self.fst.log_free_space(.{ .value_offset = k.value_offset, .value_size = k.value_size });
+            try self._set_key_disk(key_hash, Key{ .key_hash = 0, .value_size = 0, .value_offset = 0 });
         }
     }
 };

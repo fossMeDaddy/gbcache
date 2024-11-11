@@ -5,14 +5,14 @@ const lib = @import("lib.zig");
 pub fn ScheduleAction(comptime ActionType: type) type {
     return struct {
         timestamp_s: i64,
-        dynamic_buf: []u8,
+        dynamic_buf: []const u8,
         action_type: ActionType,
     };
 }
 
 /// `ActionType` is preferrably a u8, string, yk things that could come from an enum
 /// `func` is called as: `func(func_ctx, action)` where action is of type `ScheduleAction(ActionType)`
-pub fn TimeScheduler(comptime ActionType: type, comptime func: anytype, comptime func_ctx: anytype) type {
+pub fn TimeScheduler(comptime ActionType: type, comptime func: anytype, comptime FnCtx: type) type {
     const Action = ScheduleAction(ActionType);
     const ActionArrayList = std.ArrayList(Action);
 
@@ -23,6 +23,7 @@ pub fn TimeScheduler(comptime ActionType: type, comptime func: anytype, comptime
         bin_filename: []const u8 = "scheduler.bin",
         absolute_path: []const u8,
         allocator: std.mem.Allocator,
+        ctx: FnCtx,
 
         _file: std.fs.File = undefined,
         _actions: ActionArrayList = undefined,
@@ -61,7 +62,13 @@ pub fn TimeScheduler(comptime ActionType: type, comptime func: anytype, comptime
             self._schedule_buf_mutex.lock();
             defer self._schedule_buf_mutex.unlock();
 
-            try self._schedule_buffer.append(action);
+            var action_cpy = action;
+
+            const dyn_buf_cpy = try self.allocator.alloc(u8, action_cpy.dynamic_buf.len);
+            @memcpy(dyn_buf_cpy, action_cpy.dynamic_buf);
+            action_cpy.dynamic_buf = dyn_buf_cpy;
+
+            try self._schedule_buffer.append(action_cpy);
         }
 
         fn _action_ts_desc_sorting_fn(_: @TypeOf(.{}), lhs: Action, rhs: Action) bool {
@@ -87,12 +94,18 @@ pub fn TimeScheduler(comptime ActionType: type, comptime func: anytype, comptime
             const _actions_buf = try reader.readUntilDelimiterOrEofAlloc(self.allocator, log_file_eof, 50 * 1024 * 1024);
             if (_actions_buf == null) return;
             const actions_buf = _actions_buf.?;
+            defer self.allocator.free(actions_buf);
 
             var iter = std.mem.splitScalar(u8, actions_buf, log_file_sep);
             while (iter.next()) |action_buf| {
                 if (action_buf.len == 0) continue;
 
-                const action = lib.ptrs.bufToType(Action, @constCast(action_buf));
+                var action = lib.ptrs.bufToType(Action, @constCast(action_buf));
+
+                const dyn_buf_cpy = try self.allocator.alloc(u8, action.dynamic_buf.len);
+                @memcpy(dyn_buf_cpy, action.dynamic_buf);
+                action.dynamic_buf = dyn_buf_cpy;
+
                 try self._actions.append(action);
             }
         }
@@ -116,7 +129,9 @@ pub fn TimeScheduler(comptime ActionType: type, comptime func: anytype, comptime
 
                 var last_action = _last_action.?;
                 while (last_action.timestamp_s < std.time.timestamp()) {
-                    _ = @call(.auto, func, .{ func_ctx, last_action });
+                    _ = @call(.auto, func, .{ self.ctx, last_action });
+
+                    self.allocator.free(last_action.dynamic_buf);
                     _ = self._actions.pop();
 
                     const _la = self._actions.getLastOrNull();
