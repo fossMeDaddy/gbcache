@@ -14,6 +14,12 @@ pub const DataEnd: u8 = 0x1d;
 /// even if the data is encrypted, this character is received as is.
 pub const StreamEnd: u8 = 0x04;
 
+const Command = struct {
+    cmd: Cmd,
+    key: ?[]const u8 = null,
+    value: ?[]const u8 = null,
+};
+
 const Cmd = enum(u8) {
     ping,
     get,
@@ -41,28 +47,16 @@ fn string_to_cmd_enum(str: []const u8) ?Cmd {
     }
 }
 
-const Command = struct {
-    cmd: Cmd,
-    key: ?[]const u8 = null,
-    value: ?[]const u8 = null,
-};
-
 const _StreamData = struct { commands: []Command, stream_data: []u8 };
 ///`.stream_data` and `.commands` must be freed by the caller!
-fn read_stream_into_command(mem_alloc: std.mem.Allocator, stream: net.Stream) !_StreamData {
+fn read_stream_into_command(mem_alloc: std.mem.Allocator, stream: net.Stream) !?_StreamData {
     const reader = stream.reader();
 
     var commands = std.ArrayList(Command).init(mem_alloc);
 
-    const _stream_data = try reader.readUntilDelimiterAlloc(mem_alloc, StreamEnd, 512 * 1024);
-
-    var stream_data: []u8 = undefined;
-    if (lib.env.get_key()) |key| {
-        stream_data = try lib.crypto.decrypt_buffer(mem_alloc, _stream_data, key);
-        mem_alloc.free(_stream_data);
-    } else {
-        stream_data = _stream_data;
-    }
+    const _stream_data = try reader.readUntilDelimiterOrEofAlloc(mem_alloc, StreamEnd, 512 * 1024);
+    if (_stream_data == null) return null;
+    const stream_data = _stream_data.?;
 
     var iter = std.mem.splitScalar(u8, stream_data, DataSplit);
     while (iter.next()) |command_buf| {
@@ -85,17 +79,6 @@ fn read_stream_into_command(mem_alloc: std.mem.Allocator, stream: net.Stream) !_
     return .{ .commands = commands_owned, .stream_data = stream_data };
 }
 
-fn stream_write_buffer(mem_alloc: std.mem.Allocator, stream: net.Stream, buf: []const u8) !void {
-    if (lib.env.get_key()) |key| {
-        const stream_buf = try lib.crypto.encrypt_buffer(mem_alloc, buf, key);
-        defer mem_alloc.free(stream_buf);
-
-        _ = try stream.write(stream_buf);
-    } else {
-        _ = try stream.write(buf);
-    }
-}
-
 pub fn main() !void {
     try lib.env.load_dotenv(allocator);
     try lib.env.validate();
@@ -109,14 +92,18 @@ pub fn main() !void {
     std.debug.print("SERVER READY: port -> 8080\n", .{});
     while (true) {
         const c = try server.accept();
-        const stream_data = try read_stream_into_command(allocator, c.stream);
+
+        const _stream_data = try read_stream_into_command(allocator, c.stream);
+        if (_stream_data == null) continue;
+
+        const stream_data = _stream_data.?;
         defer allocator.free(stream_data.stream_data);
         defer allocator.free(stream_data.commands);
 
         for (stream_data.commands) |command| {
             switch (command.cmd) {
                 .ping => {
-                    _ = try stream_write_buffer(allocator, c.stream, "PONG");
+                    _ = try c.stream.write("PONG");
                 },
 
                 .get => {
@@ -128,7 +115,7 @@ pub fn main() !void {
 
                     const value = try root.cache.get(key);
                     if (value) |val_buf| {
-                        _ = try stream_write_buffer(allocator, c.stream, val_buf);
+                        _ = try c.stream.write(val_buf);
                     }
                 },
 
@@ -159,7 +146,7 @@ pub fn main() !void {
                     }
 
                     const result = try root.cache.increment(key, inc_by);
-                    _ = try stream_write_buffer(allocator, c.stream, &std.mem.toBytes(result));
+                    _ = try c.stream.write(&std.mem.toBytes(result));
                 },
 
                 .del => {
@@ -195,10 +182,11 @@ pub fn main() !void {
                     try root.cache.set_expires_at(key, expires_at);
                 },
             }
-            _ = try stream_write_buffer(allocator, c.stream, &[_]u8{DataSplit});
+            _ = try c.stream.write(&[_]u8{DataSplit});
         }
 
-        _ = try stream_write_buffer(allocator, c.stream, &[_]u8{DataEnd});
+        _ = try c.stream.write(&[_]u8{DataEnd});
+        c.stream.close();
     }
 }
 

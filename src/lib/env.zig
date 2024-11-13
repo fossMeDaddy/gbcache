@@ -25,32 +25,21 @@ pub fn load_dotenv(allocator: std.mem.Allocator) !void {
         if (std.mem.indexOfScalar(u8, line, '=')) |_| {
             var iter = std.mem.splitScalar(u8, line, '=');
 
-            const env_var = iter.first();
-            const env_var_val = iter.rest();
+            const _env_var = iter.first();
+            const env_var = try allocator.alloc(u8, _env_var.len);
+            @memcpy(env_var, _env_var);
+
+            const _env_var_val = iter.rest();
+            const env_var_val = try allocator.alloc(u8, _env_var_val.len);
+            @memcpy(env_var_val, _env_var_val);
+
             if (env_map.get(env_var) == null) {
-                try env_map.putMove(@constCast(env_var), @constCast(env_var_val));
+                try env_map.putMove(env_var, env_var_val);
             }
         }
     }
 }
 
 pub fn validate() !void {
-    const enc_key = EnvMap.get(constants.ENV_ENC_KEY_KEY);
-    if (enc_key) |key| {
-        if (key.len != aes_256_gcm.key_length) {
-            return error.EnvValidationFailed;
-        }
-    }
-}
-
-pub fn get_key() ?[aes_256_gcm.key_length]u8 {
-    var key: [aes_256_gcm.key_length]u8 = undefined;
-
-    if (EnvMap.get(constants.ENV_ENC_KEY_KEY)) |_key| {
-        @memcpy(&key, _key);
-    } else {
-        return null;
-    }
-
-    return key;
+    // doing nothing
 }
