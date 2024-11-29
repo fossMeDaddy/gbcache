@@ -28,3 +28,9 @@ progress:
 - standard library, fucking A
 
 I haven't found anything negative about Zig, yet.
+
+> "then why are you rewriting it in Rust?"
+
+I currently am finding out what REAL benefits rust provides by using it in another project,
+if the benefits outweigh the cost of a rewrite and subsequent maintenance is easier in rust overall,
+then I'll go through with it.
