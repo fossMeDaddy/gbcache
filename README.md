@@ -18,6 +18,7 @@ progress:
 - [ ] rewrite it in Rust (ah shit, here we go again...)
 - [ ] multi-threading (god save me, except there is no god, it's all lost & hopeless)
 - [ ] WAL file write & recovery for those of you with nastier kinks for your databases
+- [ ] pub/sub notifications for requested changes
 - [ ] backups, cuz yes.
 
 ## Comments on Zig
