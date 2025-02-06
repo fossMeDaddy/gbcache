@@ -17,7 +17,7 @@ progress:
 - [x] TTL (more general, scheduled command runs, doesn't necessarily have to be a delete)
 - [ ] rewrite it in Rust (ah shit, here we go again...)
 - [ ] multi-threading (god save me, except there is no god, it's all lost & hopeless)
-- [ ] WAL file write & recovery for those of you with nastier kinks for your databases
+- [ ] WAL file write & recovery (so you can get as kinky with your server as you want)
 - [ ] pub/sub notifications for requested changes
 - [ ] backups, cuz yes.
 
